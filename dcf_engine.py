@@ -89,31 +89,77 @@ def get_stock_data(ticker: str) -> dict:
 def calculate_fcff(data: dict) -> list:
     """
     Calculate historical Free Cash Flow to Firm:
-    FCFF = EBIT × (1 - Tax Rate) + D&A - Capex
-    (simplified: ignoring NWC changes for robustness)
+    FCFF = EBIT × (1 - Tax Rate) + D&A - Capex - ΔNWC
+
+    NWC change is estimated as 2% of revenue growth (simplified assumption).
+    A positive revenue growth implies increased NWC investment (cash outflow).
     """
     fcff_list = []
     tax = data["tax_rate"]
-    years = min(len(data["revenues"]), len(data["ebit_vals"]),
+    revenues = data["revenues"]
+    years = min(len(revenues), len(data["ebit_vals"]),
                 len(data["capex_vals"]), len(data["da_vals"]))
 
     for i in range(years):
         nopat = data["ebit_vals"][i] * (1 - tax)
-        fcff = nopat + data["da_vals"][i] - data["capex_vals"][i]
+        # Estimate NWC change: 2% of revenue growth vs prior year
+        if i < years - 1:
+            rev_growth = revenues[i] - revenues[i + 1]  # data is most-recent-first
+        else:
+            rev_growth = revenues[i] * 0.05  # assume ~5% growth for oldest year
+        delta_nwc = 0.02 * abs(rev_growth) * (1 if rev_growth > 0 else -1)
+        fcff = nopat + data["da_vals"][i] - data["capex_vals"][i] - delta_nwc
         fcff_list.append(fcff)
 
     return fcff_list
 
 
+def hamada_unlever(beta_levered: float, debt_ratio: float, tax_rate: float) -> float:
+    """
+    Hamada equation: unlever beta to remove financial risk.
+    β_unlevered = β_levered / (1 + (1 - t) × D/E)
+    """
+    d_e = debt_ratio / (1 - debt_ratio)
+    return beta_levered / (1 + (1 - tax_rate) * d_e)
+
+
+def hamada_relever(beta_unlevered: float, debt_ratio: float, tax_rate: float) -> float:
+    """
+    Hamada equation: re-lever beta for a target capital structure.
+    β_levered = β_unlevered × (1 + (1 - t) × D/E)
+    """
+    d_e = debt_ratio / (1 - debt_ratio)
+    return beta_unlevered * (1 + (1 - tax_rate) * d_e)
+
+
 def estimate_wacc(beta: float, risk_free: float = 0.045, equity_premium: float = 0.055,
-                  debt_rate: float = 0.05, debt_ratio: float = 0.25, tax_rate: float = 0.25) -> float:
+                  debt_rate: float = 0.05, debt_ratio: float = 0.25, tax_rate: float = 0.25,
+                  target_debt_ratio: float = None) -> float:
     """
     WACC = Ke × (E/V) + Kd × (1-t) × (D/V)
-    Ke = risk_free + beta × equity_premium (CAPM)
+    Ke = risk_free + β_relevered × equity_premium (CAPM)
+
+    Hamada adjustment:
+    1. Unlever the observed beta (remove current financial risk)
+    2. Re-lever with target capital structure (default: same as debt_ratio)
+
+    Args:
+        beta: Observed (levered) beta from market data
+        risk_free: Risk-free rate (default: 4.5%)
+        equity_premium: Equity risk premium (default: 5.5%)
+        debt_rate: Pre-tax cost of debt
+        debt_ratio: Current D/(D+E) ratio used to unlever beta
+        tax_rate: Corporate tax rate
+        target_debt_ratio: Target D/(D+E) for re-levering (defaults to debt_ratio)
     """
-    ke = risk_free + beta * equity_premium
-    equity_ratio = 1 - debt_ratio
-    wacc = ke * equity_ratio + debt_rate * (1 - tax_rate) * debt_ratio
+    target = target_debt_ratio if target_debt_ratio is not None else debt_ratio
+    # Step 1: Unlever observed beta
+    beta_u = hamada_unlever(beta, debt_ratio, tax_rate)
+    # Step 2: Re-lever at target structure
+    beta_l = hamada_relever(beta_u, target, tax_rate)
+    ke = risk_free + beta_l * equity_premium
+    equity_ratio = 1 - target
+    wacc = ke * equity_ratio + debt_rate * (1 - tax_rate) * target
     return wacc
 
 
